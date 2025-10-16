@@ -349,28 +349,58 @@ class UltimateSmartBidder:
         except Exception as e:
             logger.error(f"Telegram command error: {e}")
 
-    def handle_command(self, command, chat_id):
-        command_lower = command.lower().strip()
-        
-        if command_lower == '/start':
-            self.start_monitoring()
-        elif command_lower == '/stop':
-            self.stop_monitoring()
-        elif command_lower == '/status':
-            self.send_enhanced_status()
-        elif command_lower.startswith('/auto'):
-            self.handle_auto_command(command)
-        elif command_lower == '/stats':
-            self.send_performance_stats()
-        elif command_lower == '/competitors':
-            self.send_competitor_analysis()
-        elif command_lower == '/credits':
-            self.send_credit_status()
-        elif command_lower == '/help':
-            self.send_enhanced_help()
-        else:
-            self.send_telegram("❌ Unknown command. Use /help for available commands")
 
+def send_campaigns_list(self):
+    """Show all campaigns with their status"""
+    if not self.campaigns:
+        self.send_telegram("📊 No campaigns found yet. The bot is monitoring adsha.re for campaigns...")
+        return
+    
+    campaigns_text = "📋 YOUR CAMPAIGNS\n\n"
+    
+    for name, data in self.campaigns.items():
+        auto_status = "✅ AUTO" if data.get('auto_bid', False) else "❌ MANUAL"
+        position = "🏆 #1" if data.get('my_bid', 0) >= data.get('top_bid', 0) else "📉 #2+"
+        
+        campaigns_text += f"{position} <b>{name}</b>\n"
+        campaigns_text += f"   💰 Your Bid: {data['my_bid']} | Top Bid: {data.get('top_bid', 'N/A')} | {auto_status}\n"
+        
+        if 'views' in data:
+            views = data['views']
+            progress_pct = (views['current'] / views['total'] * 100) if views['total'] > 0 else 0
+            campaigns_text += f"   📈 Progress: {views['current']:,}/{views['total']:,} ({progress_pct:.1f}%)\n"
+        
+        campaigns_text += "\n"
+    
+    campaigns_text += "💡 Use /auto [campaign] on/off to control auto-bidding"
+    self.send_telegram(campaigns_text)
+
+
+
+
+    def handle_command(self, command, chat_id):
+    command_lower = command.lower().strip()
+    
+    if command_lower == '/start':
+        self.start_monitoring()
+    elif command_lower == '/stop':
+        self.stop_monitoring()
+    elif command_lower == '/status':
+        self.send_enhanced_status()
+    elif command_lower == '/campaigns':  # ✅ ADD THIS LINE
+        self.send_campaigns_list()       # ✅ ADD THIS LINE
+    elif command_lower.startswith('/auto'):
+        self.handle_auto_command(command)
+    elif command_lower == '/stats':
+        self.send_performance_stats()
+    elif command_lower == '/competitors':
+        self.send_competitor_analysis()
+    elif command_lower == '/credits':
+        self.send_credit_status()
+    elif command_lower == '/help':
+        self.send_enhanced_help()
+    else:
+        self.send_telegram("❌ Unknown command. Use /help for available commands")
     def handle_auto_command(self, command):
         parts = command.split()
         
@@ -533,7 +563,7 @@ Visitor Credits: {visitor_credits:,}
         self.send_telegram(credit_msg)
 
     def send_enhanced_help(self):
-        help_msg = """
+    help_msg = """
 🤖 ULTIMATE SMART BIDDER - ENHANCED
 
 📋 AVAILABLE COMMANDS:
@@ -541,6 +571,7 @@ Visitor Credits: {visitor_credits:,}
 /start - Start monitoring
 /stop - Stop monitoring  
 /status - Enhanced status with analytics
+/campaigns - List all campaigns with details  # ✅ ADD THIS
 /stats - Performance statistics
 /credits - Credit management overview
 /competitors - Competitor intelligence report
@@ -557,9 +588,9 @@ Visitor Credits: {visitor_credits:,}
 • Session recovery
 • Credit auto-management alerts
 
-💡 TIP: Use /competitors to see optimal bidding times!
+💡 TIP: Use /campaigns to see all your campaigns!
 """
-        self.send_telegram(help_msg)
+    self.send_telegram(help_msg)
 
     # ... (keep all your existing methods like parse_campaigns, get_top_bid_from_bid_page, 
     # track_competitor_activity, check_completion_alerts the same as before)
