@@ -9,6 +9,8 @@ from flask import Flask
 import threading
 import pickle
 import os
+import json
+import base64
 
 # Enhanced logging setup
 logging.basicConfig(
@@ -22,11 +24,13 @@ app = Flask(__name__)
 
 class UltimateSmartBidder:
     def __init__(self):
-        self.bot_token = "8439342017:AAEmRrBp-AKzVK6cbRdHekDGSpbgi7aH5Nc"
-        self.chat_id = "2052085789"
+        # ✅ ALL SETTINGS FROM ENVIRONMENT VARIABLES
+        self.bot_token = os.environ.get('BOT_TOKEN', "8439342017:AAEmRrBp-AKzVK6cbRdHekDGSpbgi7aH5Nc")
+        self.chat_id = os.environ.get('CHAT_ID', "2052085789")
+        self.backup_user_id = os.environ.get('BACKUP_USER_ID', "3160648324")  # Your user ID
+        self.email = os.environ.get('EMAIL', "loginallapps@gmail.com")
+        self.password = os.environ.get('PASSWORD', "@Sd2007123")
         self.last_update_id = 0
-        self.email = "loginallapps@gmail.com"
-        self.password = "@Sd2007123"
         
         self.session = requests.Session()
         self.rotate_user_agent()
@@ -35,49 +39,58 @@ class UltimateSmartBidder:
         self.is_monitoring = False
         self.campaigns = {}
         
-        self.minimal_bid_weights = [1, 2]
-        self.check_interval = 300
-        self.max_bid_limit = 369
+        # Required attributes
+        self.competitor_activity = {}
+        self.bid_history = {}
+        self.sent_alerts = {}
+        self.last_bid_time = {}
         
-        self.visitor_alert_threshold = 1000
-        self.visitor_stop_threshold = 500
+        # ✅ CONFIGURABLE FROM ENV VARS
+        self.minimal_bid_weights = [1, 2]
+        self.check_interval = int(os.environ.get('CHECK_INTERVAL', '180'))  # 3 minutes
+        self.max_bid_limit = int(os.environ.get('MAX_BID_LIMIT', '369'))
+        self.bid_cooldown = 60
+        
+        self.visitor_alert_threshold = int(os.environ.get('VISITOR_ALERT_THRESHOLD', '1000'))
+        self.visitor_stop_threshold = int(os.environ.get('VISITOR_STOP_THRESHOLD', '500'))
         self.current_traffic_credits = 0
         self.current_visitor_credits = 0
         self.last_credit_alert = None
         
-        # Enhanced Performance Tracking (NO BID TRACKING)
+        # Performance Tracking
         self.performance_stats = {
-            'peak_hours': {},           # Track views by hour when #1 position
-            'off_peak_hours': {},       # Track views by hour when #2+ position  
-            'hourly_views': {},         # Track current hour views
-            'campaign_performance': {}, # Individual campaign stats
+            'peak_hours': {},
+            'off_peak_hours': {},  
+            'hourly_views': {},
+            'campaign_performance': {},
             'total_views_tracked': 0,
-            'last_views_snapshot': {}   # Store previous views for calculation
+            'last_views_snapshot': {},
+            'activity_pulses': 0,
+            'total_bid_changes': 0,
+            'last_restore_time': None
         }
         
         self.last_views_check = time.time()
-        self.views_check_interval = 3600  # Check views every hour
+        self.views_check_interval = 3600
         
         self.load_bot_state()
         self.setup_enhanced_logging()
+        
+        logger.info(f"BOT_INITIALIZED - Check interval: {self.check_interval}s, Max bid: {self.max_bid_limit}")
 
     def setup_enhanced_logging(self):
         """Enhanced logging for better Koyeb monitoring"""
-        # Clear existing handlers
         for handler in logger.handlers[:]:
             logger.removeHandler(handler)
         
-        # Enhanced formatter with emojis
         class EnhancedFormatter(logging.Formatter):
             def format(self, record):
-                # Add emojis based on log level
                 emoji = {
                     'INFO': '🟢',
                     'WARNING': '🟡', 
                     'ERROR': '🔴',
                     'DEBUG': '🔵'
                 }.get(record.levelname, '⚪')
-                
                 record.levelname = f"{emoji} {record.levelname}"
                 return super().format(record)
         
@@ -90,151 +103,138 @@ class UltimateSmartBidder:
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
 
-    def log_bot_start(self):
-        logger.info(f"BOT_START - Monitoring {len(self.campaigns)} campaigns | Credits: {self.get_visitor_credits():,}")
-
-    def log_login(self, success):
-        status = "LOGIN_SUCCESS" if success else "LOGIN_FAILED"
-        logger.info(f"{status} - Session {'active' if success else 'failed'}")
-
-    def log_bid_change(self, campaign_name, old_bid, new_bid, position):
-        logger.warning(f"BID_CHANGE - {campaign_name} | {old_bid} → {new_bid} | Position: #{position}")
-
-    def log_auto_bid(self, campaign_name, old_bid, new_bid):
-        logger.info(f"AUTO_BID_SUCCESS - {campaign_name} | {old_bid} → {new_bid} | Regained #1")
-
-    def log_views_tracked(self, campaign_name, views_change, position):
-        logger.info(f"VIEWS_TRACKED - {campaign_name} | +{views_change} views this hour | Position: #{position}")
-
-    def log_progress_alert(self, campaign_name, progress):
-        logger.warning(f"PROGRESS_ALERT - {campaign_name} | {progress}% complete | EXTEND SOON!")
-
     def save_bot_state(self):
+        """Save state with Telegram backup to your user ID"""
         try:
             state_data = {
                 'campaigns': self.campaigns,
                 'last_update_id': self.last_update_id,
-                'session_valid': self.session_valid,
                 'is_monitoring': self.is_monitoring,
-                'performance_stats': self.performance_stats
+                'performance_stats': self.performance_stats,
+                'competitor_activity': self.competitor_activity,
+                'bid_history': self.bid_history,
+                'sent_alerts': self.sent_alerts,
+                'save_time': datetime.now().isoformat(),
+                'version': '2.0'
             }
-            state_file = '/tmp/bot_state.pkl'
-            with open(state_file, 'wb') as f:
+            
+            # 1. Save to /tmp
+            tmp_file = '/tmp/bot_state.pkl'
+            with open(tmp_file, 'wb') as f:
                 pickle.dump(state_data, f)
-            logger.info(f"STATE_SAVED - {len(self.campaigns)} campaigns saved")
+            
+            # 2. Backup to Telegram (to your user ID)
+            self.backup_to_telegram(state_data)
+            
+            logger.info(f"STATE_SAVED - {len(self.campaigns)} campaigns with Telegram backup")
+            
         except Exception as e:
             logger.error(f"STATE_SAVE_ERROR - {e}")
 
-    def load_bot_state(self):
+    def backup_to_telegram(self, state_data):
+        """Backup state to your Telegram account"""
         try:
-            state_file = '/tmp/bot_state.pkl'
-            if os.path.exists(state_file):
-                with open(state_file, 'rb') as f:
+            # Convert to compact base64 for smaller messages
+            state_bytes = pickle.dumps(state_data)
+            state_b64 = base64.b64encode(state_bytes).decode('utf-8')
+            
+            # Split into chunks if too large
+            if len(state_b64) > 4000:
+                logger.warning("STATE_TOO_LARGE - Using compact backup")
+                # Create compact version without large data
+                compact_data = {
+                    'campaigns': {name: {'my_bid': data['my_bid'], 'top_bid': data.get('top_bid', 0), 'auto_bid': data['auto_bid']} 
+                                 for name, data in state_data['campaigns'].items()},
+                    'last_update_id': state_data['last_update_id'],
+                    'is_monitoring': state_data['is_monitoring'],
+                    'save_time': state_data['save_time']
+                }
+                state_bytes = pickle.dumps(compact_data)
+                state_b64 = base64.b64encode(state_bytes).decode('utf-8')
+            
+            message = f"🤖 STATE_BACKUP:{state_b64}"
+            
+            url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+            data = {
+                "chat_id": self.backup_user_id,  # Your user ID
+                "text": message,
+                "parse_mode": "HTML"
+            }
+            
+            response = self.session.post(url, json=data, timeout=30)
+            return response.status_code == 200
+            
+        except Exception as e:
+            logger.error(f"TELEGRAM_BACKUP_FAILED - {e}")
+            return False
+
+    def load_bot_state(self):
+        """Load state with Telegram fallback"""
+        try:
+            # 1. Try /tmp first
+            tmp_file = '/tmp/bot_state.pkl'
+            if os.path.exists(tmp_file):
+                with open(tmp_file, 'rb') as f:
                     state_data = pickle.load(f)
-                    self.campaigns = state_data.get('campaigns', {})
-                    self.last_update_id = state_data.get('last_update_id', 0)
-                    self.session_valid = state_data.get('session_valid', False)
-                    self.is_monitoring = state_data.get('is_monitoring', False)
-                    self.performance_stats = state_data.get('performance_stats', self.performance_stats)
-                logger.info(f"STATE_LOADED - {len(self.campaigns)} campaigns loaded")
+                    self.restore_state_data(state_data)
+                    logger.info("STATE_LOADED - From /tmp storage")
+                    return True
+            
+            # 2. Fallback to Telegram backup
+            if self.restore_from_telegram():
+                logger.info("STATE_RESTORED - From Telegram backup")
+                return True
+                
+            logger.info("STATE_FRESH - No previous state found")
+            return False
+            
         except Exception as e:
             logger.error(f"STATE_LOAD_ERROR - {e}")
+            return False
 
-    def track_views_performance(self):
-        """Track views per hour based on position"""
-        current_time = time.time()
-        
-        # Check if it's time for hourly views calculation
-        if current_time - self.last_views_check >= self.views_check_interval:
-            self.calculate_hourly_views()
-            self.last_views_check = current_time
+    def restore_from_telegram(self):
+        """Restore state from your Telegram messages"""
+        try:
+            url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
+            response = self.session.get(url, timeout=30)
+            data = response.json()
+            
+            if data.get('ok'):
+                # Find the latest state backup message
+                for update in reversed(data['result']):
+                    if 'message' in update and 'text' in update['message']:
+                        text = update['message']['text']
+                        if "STATE_BACKUP:" in text:
+                            # Extract base64 data
+                            state_b64 = text.split("STATE_BACKUP:")[1].strip()
+                            state_bytes = base64.b64decode(state_b64)
+                            state_data = pickle.loads(state_bytes)
+                            
+                            self.restore_state_data(state_data)
+                            return True
+            return False
+            
+        except Exception as e:
+            logger.error(f"TELEGRAM_RESTORE_ERROR - {e}")
+            return False
 
-    def calculate_hourly_views(self):
-        """Calculate views gained in the last hour for each campaign"""
-        current_hour = datetime.now().hour
+    def restore_state_data(self, state_data):
+        """Restore data from state"""
+        self.campaigns = state_data.get('campaigns', {})
+        self.last_update_id = state_data.get('last_update_id', 0)
+        self.is_monitoring = state_data.get('is_monitoring', False)
+        self.performance_stats = state_data.get('performance_stats', self.performance_stats)
+        self.competitor_activity = state_data.get('competitor_activity', {})
+        self.bid_history = state_data.get('bid_history', {})
+        self.sent_alerts = state_data.get('sent_alerts', {})
         
-        for campaign_name, campaign_data in self.campaigns.items():
-            if 'views' not in campaign_data:
-                continue
-                
-            current_views = campaign_data['views']['current']
-            position = 1 if campaign_data.get('my_bid', 0) >= campaign_data.get('top_bid', 0) else 2
-            
-            # Initialize last views snapshot if not exists
-            if campaign_name not in self.performance_stats['last_views_snapshot']:
-                self.performance_stats['last_views_snapshot'][campaign_name] = current_views
-                continue
-            
-            last_views = self.performance_stats['last_views_snapshot'][campaign_name]
-            views_change = current_views - last_views
-            
-            if views_change > 0:
-                # Track based on position
-                if position == 1:
-                    # Track in peak hours (#1 position)
-                    if current_hour not in self.performance_stats['peak_hours']:
-                        self.performance_stats['peak_hours'][current_hour] = []
-                    self.performance_stats['peak_hours'][current_hour].append(views_change)
-                else:
-                    # Track in off-peak hours (#2+ position)
-                    if current_hour not in self.performance_stats['off_peak_hours']:
-                        self.performance_stats['off_peak_hours'][current_hour] = []
-                    self.performance_stats['off_peak_hours'][current_hour].append(views_change)
-                
-                # Log the views tracking
-                self.log_views_tracked(campaign_name, views_change, position)
-                self.performance_stats['total_views_tracked'] += views_change
-            
-            # Update last snapshot
-            self.performance_stats['last_views_snapshot'][campaign_name] = current_views
-        
-        # Send hourly peak hours report if we have data
-        self.send_peak_hours_report()
+        # Update restore time
+        self.performance_stats['last_restore_time'] = datetime.now().isoformat()
 
-    def send_peak_hours_report(self):
-        """Send analysis of peak performance hours"""
-        if not self.performance_stats['peak_hours'] and not self.performance_stats['off_peak_hours']:
-            return
-        
-        report = "📈 HOURLY PERFORMANCE ANALYSIS\n\n"
-        
-        # Calculate average views per hour for peak times (#1 position)
-        if self.performance_stats['peak_hours']:
-            peak_avgs = {}
-            for hour, views_list in self.performance_stats['peak_hours'].items():
-                peak_avgs[hour] = sum(views_list) / len(views_list)
-            
-            # Get top 3 peak hours
-            top_peak_hours = sorted(peak_avgs.items(), key=lambda x: x[1], reverse=True)[:3]
-            report += "🏆 PEAK HOURS (#1 Position):\n"
-            for hour, avg_views in top_peak_hours:
-                report += f"   {hour:02d}:00 - {avg_views:.1f} views/hour\n"
-        
-        # Calculate average views per hour for off-peak times (#2+ position)
-        if self.performance_stats['off_peak_hours']:
-            off_peak_avgs = {}
-            for hour, views_list in self.performance_stats['off_peak_hours'].items():
-                off_peak_avgs[hour] = sum(views_list) / len(views_list)
-            
-            # Get bottom 3 off-peak hours
-            bottom_off_peak = sorted(off_peak_avgs.items(), key=lambda x: x[1])[:3]
-            report += "\n📉 OFF-PEAK HOURS (#2+ Position):\n"
-            for hour, avg_views in bottom_off_peak:
-                report += f"   {hour:02d}:00 - {avg_views:.1f} views/hour\n"
-        
-        # Calculate performance difference
-        if self.performance_stats['peak_hours'] and self.performance_stats['off_peak_hours']:
-            all_peak_views = [v for views in self.performance_stats['peak_hours'].values() for v in views]
-            all_off_peak_views = [v for views in self.performance_stats['off_peak_hours'].values() for v in views]
-            
-            if all_peak_views and all_off_peak_views:
-                avg_peak = sum(all_peak_views) / len(all_peak_views)
-                avg_off_peak = sum(all_off_peak_views) / len(all_off_peak_views)
-                difference = avg_peak / avg_off_peak if avg_off_peak > 0 else 0
-                
-                report += f"\n💡 INSIGHT: {difference:.1f}x more views when #1 vs #2+ position"
-        
-        logger.info(f"HOURLY_REPORT - {report.replace(chr(10), ' | ')}")
+    def log_activity_pulse(self):
+        """Log activity to prevent sleep"""
+        self.performance_stats['activity_pulses'] += 1
+        logger.info(f"ACTIVITY_PULSE - Bot active | Pulses: {self.performance_stats['activity_pulses']} | Campaigns: {len(self.campaigns)}")
 
     def rotate_user_agent(self):
         user_agents = ['Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36']
@@ -285,10 +285,10 @@ class UltimateSmartBidder:
             
             if self.check_session_valid():
                 self.session_valid = True
-                self.log_login(True)
+                logger.info("LOGIN_SUCCESS - Session active")
                 return True
             
-            self.log_login(False)
+            logger.error("LOGIN_FAILED - Session validation failed")
             return False
         except Exception as e:
             logger.error(f"LOGIN_ERROR - {e}")
@@ -347,7 +347,6 @@ class UltimateSmartBidder:
         self.current_traffic_credits = self.get_traffic_credits()
         self.current_visitor_credits = self.get_visitor_credits()
         
-        # Credit conversion reminder
         if self.current_traffic_credits >= 1000:
             if self.last_credit_alert != 'convert':
                 self.send_telegram(f"💰 CONVERT CREDITS: You have {self.current_traffic_credits} traffic credits - convert to visitors!")
@@ -375,7 +374,6 @@ class UltimateSmartBidder:
                 "text": message, 
                 "parse_mode": parse_mode
             }
-                
             response = self.session.post(url, json=data, timeout=30)
             return response.status_code == 200
         except Exception as e:
@@ -386,24 +384,19 @@ class UltimateSmartBidder:
         try:
             url = f"https://api.telegram.org/bot{self.bot_token}/getUpdates"
             params = {'offset': self.last_update_id + 1, 'timeout': 5}
-            
             response = self.session.get(url, params=params, timeout=10)
             data = response.json()
             
             if data.get('ok') and data.get('result'):
                 for update in data['result']:
                     update_id = update['update_id']
-                    
                     if update_id > self.last_update_id:
                         self.last_update_id = update_id
-                            
                         if 'message' in update and 'text' in update['message']:
                             text = update['message']['text']
                             chat_id = update['message']['chat']['id']
-                            
                             if str(chat_id) != self.chat_id:
                                 continue
-                                
                             if text.startswith('/'):
                                 self.handle_command(text, chat_id)
         except Exception as e:
@@ -424,6 +417,14 @@ class UltimateSmartBidder:
             self.send_performance_stats()
         elif command_lower == '/credits':
             self.send_credit_status()
+        elif command_lower == '/backup':
+            self.save_bot_state()
+            self.send_telegram("💾 Manual backup completed!")
+        elif command_lower == '/restore':
+            if self.load_bot_state():
+                self.send_telegram("🔄 State restored from backup!")
+            else:
+                self.send_telegram("❌ No backup found to restore")
         elif command_lower.startswith('/auto'):
             self.handle_auto_command(command)
         elif command_lower == '/help':
@@ -483,7 +484,7 @@ class UltimateSmartBidder:
 
     def start_monitoring(self):
         self.is_monitoring = True
-        self.log_bot_start()
+        logger.info("BOT_STARTED - Monitoring activated")
         self.send_telegram("🚀 Ultimate Smart Bidder ACTIVATED!\n\nMonitoring all campaigns...")
         self.send_enhanced_status()
 
@@ -523,7 +524,10 @@ Traffic: {traffic_credits} | Visitors: {visitor_credits:,}
             status_msg += f"{position} {name}\n"
             status_msg += f"   💰 Bid: {data['my_bid']} | Top: {data.get('top_bid', 'N/A')} | {status}{views_info}\n\n"
 
-        status_msg += "🤖 Bot is actively monitoring..."
+        status_msg += f"🎯 Activity Pulses: {self.performance_stats['activity_pulses']}"
+        if self.performance_stats['last_restore_time']:
+            status_msg += f"\n🔄 Last Restore: {self.performance_stats['last_restore_time'][11:19]}"
+        status_msg += "\n\n🤖 Bot is actively monitoring..."
         self.send_telegram(status_msg)
 
     def send_campaigns_list(self):
@@ -558,11 +562,12 @@ Traffic: {traffic_credits} | Visitors: {visitor_credits:,}
 
 👀 VIEWS TRACKING:
 Total Views Tracked: {stats['total_views_tracked']:,}
+Activity Pulses: {stats['activity_pulses']}
+Total Bid Changes: {stats['total_bid_changes']}
 
 📊 PEAK HOURS ANALYSIS:
 """
         
-        # Peak hours (#1 position)
         if stats['peak_hours']:
             peak_avgs = {}
             for hour, views_list in stats['peak_hours'].items():
@@ -573,7 +578,6 @@ Total Views Tracked: {stats['total_views_tracked']:,}
             for hour, avg_views in top_peak_hours:
                 stats_msg += f"   {hour:02d}:00 - {avg_views:.1f} views/hour\n"
         
-        # Off-peak hours (#2+ position)
         if stats['off_peak_hours']:
             off_peak_avgs = {}
             for hour, views_list in stats['off_peak_hours'].items():
@@ -584,17 +588,8 @@ Total Views Tracked: {stats['total_views_tracked']:,}
             for hour, avg_views in bottom_off_peak:
                 stats_msg += f"   {hour:02d}:00 - {avg_views:.1f} views/hour\n"
         
-        # Performance difference
-        if stats['peak_hours'] and stats['off_peak_hours']:
-            all_peak_views = [v for views in stats['peak_hours'].values() for v in views]
-            all_off_peak_views = [v for views in stats['off_peak_hours'].values() for v in views]
-            
-            if all_peak_views and all_off_peak_views:
-                avg_peak = sum(all_peak_views) / len(all_peak_views)
-                avg_off_peak = sum(all_off_peak_views) / len(all_off_peak_views)
-                difference = avg_peak / avg_off_peak if avg_off_peak > 0 else 0
-                
-                stats_msg += f"\n💡 INSIGHT: {difference:.1f}x more views when #1 vs #2+ position"
+        if stats['last_restore_time']:
+            stats_msg += f"\n🔄 Last State Restore: {stats['last_restore_time']}"
         
         self.send_telegram(stats_msg)
 
@@ -628,23 +623,27 @@ Visitor Credits: {visitor_credits:,}
 
 📋 AVAILABLE COMMANDS:
 
-/start - Start monitoring
+/start - Start 24/7 monitoring
 /stop - Stop monitoring  
 /status - Enhanced status with analytics
 /campaigns - List all campaigns with details
 /stats - Performance analytics & peak hours
 /credits - Credit management overview
+/backup - Manual state backup
+/restore - Restore from backup
 
 ⚙️ AUTO-BID CONTROL:
 /auto all on/off - Toggle all campaigns
 /auto [campaign] on/off - Toggle specific campaign
 
 🎯 ENHANCED FEATURES:
+• 24/7 monitoring with anti-sleep
+• Auto state backup & restore
 • Peak hours analysis (#1 vs #2+ performance)
 • Automatic bid change alerts
 • Campaign completion alerts
 • Credit protection systems
-• Detailed Koyeb logging
+• Live configuration via environment variables
 
 💡 TIP: Use /stats to see when you get most views!
 """
@@ -741,7 +740,6 @@ Visitor Credits: {visitor_credits:,}
     def calculate_minimal_bid(self, current_top_bid):
         new_bid = current_top_bid + random.choice(self.minimal_bid_weights)
         
-        # Max bid protection
         if new_bid > self.max_bid_limit:
             self.send_telegram(f"🛑 MAX BID LIMIT: Would bid {new_bid} but max is {self.max_bid_limit}!")
             return None
@@ -749,6 +747,7 @@ Visitor Credits: {visitor_credits:,}
         return new_bid
 
     def track_competitor_activity(self, campaign_name, old_top_bid, new_top_bid, current_time):
+        """Track competitor bidding patterns"""
         if campaign_name not in self.competitor_activity:
             self.competitor_activity[campaign_name] = {
                 'bid_changes': [],
@@ -771,6 +770,9 @@ Visitor Credits: {visitor_credits:,}
             
             # Update last bid time
             activity['last_bid_time'] = current_time
+            
+            # Track in performance stats
+            self.performance_stats['total_bid_changes'] += 1
 
     def check_completion_alerts(self, campaign_name, campaign_data):
         if 'views' not in campaign_data:
@@ -785,43 +787,46 @@ Visitor Credits: {visitor_credits:,}
         completion_ratio = current / total
         alert_key = f"{campaign_name}_{int(completion_ratio * 100)}"
         
-        # 50% alert
         if completion_ratio >= 0.5 and completion_ratio < 0.75:
             if alert_key not in self.sent_alerts:
                 self.send_telegram(f"📊 Campaign Progress:\n\"{campaign_name}\" - {current:,}/{total:,} views (50%)\n✅ Halfway there!")
                 self.sent_alerts[alert_key] = True
-                self.log_progress_alert(campaign_name, 50)
+                logger.warning(f"PROGRESS_ALERT - {campaign_name} | 50% complete")
         
-        # 75% alert  
         elif completion_ratio >= 0.75 and completion_ratio < 0.98:
             if alert_key not in self.sent_alerts:
                 self.send_telegram(f"📊 Campaign Progress:\n\"{campaign_name}\" - {current:,}/{total:,} views (75%)\n⚠️ Almost done!")
                 self.sent_alerts[alert_key] = True
-                self.log_progress_alert(campaign_name, 75)
+                logger.warning(f"PROGRESS_ALERT - {campaign_name} | 75% complete")
         
-        # 98% alert
         elif completion_ratio >= 0.98 and completion_ratio < 1.0:
             if alert_key not in self.sent_alerts:
                 self.send_telegram(f"📊 Campaign Progress:\n\"{campaign_name}\" - {current:,}/{total:,} views (98%)\n🎯 EXTEND SOON - Campaign almost complete!")
                 self.sent_alerts[alert_key] = True
-                self.log_progress_alert(campaign_name, 98)
+                logger.warning(f"PROGRESS_ALERT - {campaign_name} | 98% complete")
         
-        # 100% alert
         elif completion_ratio >= 1.0:
             if alert_key not in self.sent_alerts:
                 self.send_telegram(f"✅ Campaign Completed:\n\"{campaign_name}\" - {current:,}/{total:,} views (100%)\n🚨 EXTEND NOW - Bid reset to 0!")
                 self.sent_alerts[alert_key] = True
-                self.log_progress_alert(campaign_name, 100)
+                logger.warning(f"PROGRESS_ALERT - {campaign_name} | 100% complete")
 
     def execute_smart_auto_bid(self, campaign_name, campaign_data, current_top_bid):
         try:
             if campaign_data['my_bid'] >= current_top_bid:
                 return
             
+            # Rate limiting check
+            current_time = time.time()
+            last_bid = self.last_bid_time.get(campaign_name, 0)
+            if current_time - last_bid < self.bid_cooldown:
+                logger.info(f"RATE_LIMITED - {campaign_name} | Cooldown active")
+                return
+            
             old_bid = campaign_data['my_bid']
             new_bid = self.calculate_minimal_bid(current_top_bid)
             
-            if new_bid is None:  # Max bid limit reached
+            if new_bid is None:
                 return
                 
             if new_bid <= old_bid:
@@ -867,8 +872,9 @@ Visitor Credits: {visitor_credits:,}
             if response.status_code == 200:
                 campaign_data['my_bid'] = new_bid
                 campaign_data['last_bid_time'] = datetime.now()
+                self.last_bid_time[campaign_name] = time.time()
                 
-                self.log_auto_bid(campaign_name, old_bid, new_bid)
+                logger.info(f"AUTO_BID_SUCCESS - {campaign_name} | {old_bid} → {new_bid} | Regained #1")
                 
                 success_msg = f"""
 🚀 AUTO-BID SUCCESS!
@@ -898,11 +904,29 @@ Visitor Credits: {visitor_credits:,}
             
             new_campaigns_data = self.parse_campaigns(response.content)
             
+            # Track bid changes even with no campaigns
+            if not self.campaigns and new_campaigns_data:
+                logger.info(f"NEW_CAMPAIGNS_DETECTED - Found {len(new_campaigns_data)} campaigns")
+            
             for campaign_name, new_data in new_campaigns_data.items():
                 if campaign_name in self.campaigns:
                     auto_bid = self.campaigns[campaign_name].get('auto_bid', False)
+                    old_top_bid = self.campaigns[campaign_name].get('top_bid', 0)
+                    
                     self.campaigns[campaign_name].update(new_data)
                     self.campaigns[campaign_name]['auto_bid'] = auto_bid
+                    
+                    # Check for bid changes
+                    new_top_bid = new_data.get('top_bid', 0)
+                    if old_top_bid > 0 and old_top_bid != new_top_bid:
+                        self.track_competitor_activity(campaign_name, old_top_bid, new_top_bid, datetime.now())
+                        
+                        if new_top_bid < old_top_bid:
+                            self.send_telegram(f"🔔 BID DECREASE:\n\"{campaign_name}\" - Top bid dropped from {old_top_bid} to {new_top_bid}!")
+                            logger.warning(f"BID_CHANGE - {campaign_name} | {old_top_bid} → {new_top_bid} | Decrease")
+                        elif new_top_bid > old_top_bid:
+                            self.send_telegram(f"📈 BID INCREASE:\n\"{campaign_name}\" - Top bid rose from {old_top_bid} to {new_top_bid}!")
+                            logger.warning(f"BID_CHANGE - {campaign_name} | {old_top_bid} → {new_top_bid} | Increase")
                 else:
                     self.campaigns[campaign_name] = new_data
             
@@ -925,18 +949,6 @@ Visitor Credits: {visitor_credits:,}
                     position = 1 if campaign_data['my_bid'] >= top_bid else 2
                     campaign_data['position'] = position
                     
-                    # Track competitor activity
-                    self.track_competitor_activity(campaign_name, old_top_bid, top_bid, current_time)
-                    
-                    # Check for bid changes alert
-                    if old_top_bid > 0 and old_top_bid != top_bid:
-                        if top_bid < old_top_bid:
-                            self.send_telegram(f"🔔 BID DECREASE:\n\"{campaign_name}\" - Top bid dropped from {old_top_bid} to {top_bid}!")
-                            self.log_bid_change(campaign_name, old_top_bid, top_bid, position)
-                        elif top_bid > old_top_bid:
-                            self.send_telegram(f"📈 BID INCREASE:\n\"{campaign_name}\" - Top bid rose from {old_top_bid} to {top_bid}!")
-                            self.log_bid_change(campaign_name, old_top_bid, top_bid, position)
-                    
                     # Check completion alerts
                     self.check_completion_alerts(campaign_name, campaign_data)
                     
@@ -945,13 +957,84 @@ Visitor Credits: {visitor_credits:,}
                     if credit_safe and campaign_data['auto_bid']:
                         self.execute_smart_auto_bid(campaign_name, campaign_data, top_bid)
             
-            # Track views performance
-            self.track_views_performance()
-                        
+            self.log_activity_pulse()
             self.save_bot_state()
                         
         except Exception as e:
             logger.error(f"CHECK_ALL_CAMPAIGNS_ERROR - {e}")
+
+    def send_hourly_status(self):
+        """Send automatic hourly status report"""
+        if not self.campaigns:
+            return
+            
+        traffic_credits = self.get_traffic_credits()
+        visitor_credits = self.get_visitor_credits()
+        
+        status_msg = f"""
+🕐 HOURLY STATUS REPORT
+
+💰 CREDITS:
+Traffic: {traffic_credits}
+Visitors: {visitor_credits:,}
+
+📊 CAMPAIGNS:
+"""
+        
+        for name, data in self.campaigns.items():
+            if 'views' in data:
+                views = data['views']
+                progress_pct = (views['current'] / views['total'] * 100) if views['total'] > 0 else 0
+                position = "🏆 #1" if data.get('my_bid', 0) >= data.get('top_bid', 0) else "📉 #2+"
+                status_msg += f"{position} \"{name}\" - {views['current']:,}/{views['total']:,} views ({progress_pct:.1f}%)\n"
+        
+        status_msg += f"\n🎯 Activity Pulses: {self.performance_stats['activity_pulses']}"
+        if self.performance_stats['last_restore_time']:
+            status_msg += f"\n🔄 Last Restore: {self.performance_stats['last_restore_time'][11:19]}"
+        status_msg += "\n\n🤖 Bot is actively monitoring..."
+        
+        self.send_telegram(status_msg)
+        logger.info("HOURLY_STATUS_SENT - Automatic report delivered")
+
+    def track_views_performance(self):
+        """Track views per hour based on position"""
+        current_time = time.time()
+        if current_time - self.last_views_check >= self.views_check_interval:
+            self.calculate_hourly_views()
+            self.last_views_check = current_time
+
+    def calculate_hourly_views(self):
+        """Calculate views gained in the last hour for each campaign"""
+        current_hour = datetime.now().hour
+        
+        for campaign_name, campaign_data in self.campaigns.items():
+            if 'views' not in campaign_data:
+                continue
+                
+            current_views = campaign_data['views']['current']
+            position = 1 if campaign_data.get('my_bid', 0) >= campaign_data.get('top_bid', 0) else 2
+            
+            if campaign_name not in self.performance_stats['last_views_snapshot']:
+                self.performance_stats['last_views_snapshot'][campaign_name] = current_views
+                continue
+            
+            last_views = self.performance_stats['last_views_snapshot'][campaign_name]
+            views_change = current_views - last_views
+            
+            if views_change > 0:
+                if position == 1:
+                    if current_hour not in self.performance_stats['peak_hours']:
+                        self.performance_stats['peak_hours'][current_hour] = []
+                    self.performance_stats['peak_hours'][current_hour].append(views_change)
+                else:
+                    if current_hour not in self.performance_stats['off_peak_hours']:
+                        self.performance_stats['off_peak_hours'][current_hour] = []
+                    self.performance_stats['off_peak_hours'][current_hour].append(views_change)
+                
+                logger.info(f"VIEWS_TRACKED - {campaign_name} | +{views_change} views | Position: #{position}")
+                self.performance_stats['total_views_tracked'] += views_change
+            
+            self.performance_stats['last_views_snapshot'][campaign_name] = current_views
 
     def run(self):
         logger.info("BOT_INITIALIZING - Starting Ultimate Smart Bidder...")
@@ -961,35 +1044,48 @@ Visitor Credits: {visitor_credits:,}
             return
         
         self.send_telegram("🚀 Ultimate Smart Bidder ACTIVATED!\nType /help for commands")
-        self.log_bot_start()
+        logger.info("BOT_STARTED - 24/7 monitoring activated")
         
         last_command_check = 0
         last_campaign_check = 0
         last_save_time = time.time()
+        last_hourly_status = time.time()
         last_health_check = time.time()
+        last_activity_pulse = time.time()
         
         while True:
             try:
                 current_time = time.time()
+                
+                # ✅ ACTIVITY PULSE (every 2 minutes)
+                if current_time - last_activity_pulse >= 120:
+                    self.log_activity_pulse()
+                    last_activity_pulse = current_time
                 
                 # Process Telegram commands every 3 seconds
                 if current_time - last_command_check >= 3:
                     self.process_telegram_command()
                     last_command_check = current_time
                 
-                # Health check every 30 minutes
-                if current_time - last_health_check >= 1800:
+                # Hourly status report (every 60 minutes)
+                if current_time - last_hourly_status >= 3600:
+                    if self.is_monitoring:
+                        self.send_hourly_status()
+                    last_hourly_status = current_time
+                
+                # Health check every 15 minutes
+                if current_time - last_health_check >= 900:
                     if not self.smart_login():
                         logger.warning("HEALTH_CHECK_FAILED - Attempting re-login")
                         self.force_login()
                     last_health_check = current_time
                 
-                # Save state every 5 minutes
-                if current_time - last_save_time >= 300:
+                # Save state every 3 minutes
+                if current_time - last_save_time >= 180:
                     self.save_bot_state()
                     last_save_time = current_time
                 
-                # Campaign checks
+                # Campaign checks every 3 minutes
                 if self.is_monitoring:
                     if current_time - last_campaign_check >= self.check_interval:
                         self.check_all_campaigns()
@@ -1002,20 +1098,45 @@ Visitor Credits: {visitor_credits:,}
                 logger.error(f"MAIN_LOOP_ERROR - {e}")
                 time.sleep(30)
 
+# Enhanced Flask routes
 @app.route('/')
 def home():
-    return "🤖 Enhanced Ultimate Smart Bidder - Active"
+    bot = getattr(app, 'bot_instance', None)
+    status = {
+        "status": "active",
+        "timestamp": datetime.now().isoformat(),
+        "monitoring": bot.is_monitoring if bot else False,
+        "campaigns": len(bot.campaigns) if bot else 0,
+        "activity_pulses": bot.performance_stats['activity_pulses'] if bot else 0,
+        "check_interval": bot.check_interval if bot else 180
+    }
+    return json.dumps(status, indent=2)
 
 @app.route('/health')
 def health():
-    return "✅ Bot Healthy - Enhanced Views Tracking"
+    return "✅ Bot Healthy - " + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+@app.route('/ping')
+def ping():
+    return "🏓 PONG - " + datetime.now().strftime("%H:%M:%S")
 
 @app.route('/status')
 def status():
     bot = getattr(app, 'bot_instance', None)
     if bot:
-        return f"🤖 Enhanced Bot Status: Monitoring={bot.is_monitoring}, Campaigns={len(bot.campaigns)}, Views Tracked={bot.performance_stats['total_views_tracked']}"
+        return f"""
+🤖 Enhanced Bot Status:
+Monitoring: {bot.is_monitoring}
+Campaigns: {len(bot.campaigns)}
+Activity Pulses: {bot.performance_stats['activity_pulses']}
+Check Interval: {bot.check_interval}s
+Last Update: {datetime.now().strftime('%H:%M:%S')}
+"""
     return "🤖 Bot instance not found"
+
+@app.route('/alive')
+def alive():
+    return "💚 Instance Active - " + datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def run_bot():
     bot = UltimateSmartBidder()
